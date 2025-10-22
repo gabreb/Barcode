@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html>
+<body style="margin:0;overflow:hidden;position:relative">
+  <div id="rate" style="position:absolute;top:10px;left:10px;color:red;font:16px monospace;background:rgba(0,0,0,0.5);padding:4px;z-index:1"></div>
+  <canvas id="gpu-canvas"></canvas>
+  <canvas id="copy-canvas" style="display:none"></canvas>
+  <video id="video" autoplay muted playsinline style="display:none"></video>
+
+  <script type="module">
+    console.clear();
+
+    async function init() {
+      const totalLines = 50;
+      const sampleCount = 100;
+      const delay = 0;
+
+      const video = document.getElementById('video');
+      video.srcObject = await navigator.mediaDevices.getUserMedia({ video: true });
+      await new Promise(r => video.addEventListener('loadedmetadata', r));
+      video.play();
+
+      const copyCanvas = document.getElementById('copy-canvas');
+      const copyCtx = copyCanvas.getContext('2d'); //getContext('webgl') 'webgpu' (newer and more powerful)
+
+      const canvas = document.getElementById('gpu-canvas');
+      const ctx = canvas.getContext('2d');
+
+      const rateDisplay = document.getElementById('rate');
+
+      canvas.width = copyCanvas.width = video.videoWidth;
+      canvas.height = copyCanvas.height = video.videoHeight;
+
+      let bestEverScore = -1;
+      let bestEverLine = null;
+      let linesToRender = [];
+      let stableCount = 0;
+
+      function getLineProfile(img, w, x0, y0, x1, y1, samples = 100) {
+        const profile = [];
+        for (let i = 0; i < samples; i++) {
+          const t = i / (samples - 1);
+          const x = (x0 * (1 - t) + x1 * t) | 0;
+          const y = (y0 * (1 - t) + y1 * t) | 0;
+          const idx = (y * w + x) * 4;
+          const lum = (img[idx] + img[idx + 1] + img[idx + 2]) / 3;
+          profile.push(lum);
+        }
+        return profile;
+      }
+
+      function getStripeScore(profile) {
+        let score = 0;
+        for (let i = 1; i < profile.length; i++) {
+          score += Math.abs(profile[i] - profile[i - 1]);
+        }
+        return score;
+      }
+
+      function renderFrame() {
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+        // Draw red candidate lines
+        ctx.strokeStyle = 'rgba(255,0,0,0.4)';
+        ctx.lineWidth = 2;
+        for (const [x0, y0, x1, y1] of linesToRender) {
+          ctx.beginPath();
+          ctx.moveTo(x0, y0);
+          ctx.lineTo(x1, y1);
+          ctx.stroke();
+        }
+
+        // Draw best-ever green line
+        if (bestEverLine) {
+          ctx.strokeStyle = 'lime';
+          ctx.lineWidth = 6;
+          ctx.beginPath();
+          ctx.moveTo(bestEverLine[0], bestEverLine[1]);
+          ctx.lineTo(bestEverLine[2], bestEverLine[3]);
+          ctx.stroke();
+        }
+
+        requestAnimationFrame(renderFrame);
+      }
+
+      async function runBarcodeDetectionLoop() {
+        while (true) {
+          copyCtx.drawImage(video, 0, 0);
+          const img = copyCtx.getImageData(0, 0, canvas.width, canvas.height).data;
+
+          let bestLineThisFrame = null;
+          let bestScoreThisFrame = -1;
+          linesToRender = [];
+
+          for (let i = 0; i < totalLines; i++) {
+            let angle, cx, cy, length;
+
+            if (stableCount >= 350 && bestEverLine) {
+              const [x0b, y0b, x1b, y1b] = bestEverLine;
+              const cbx = (x0b + x1b) / 2;
+              const cby = (y0b + y1b) / 2;
+              const angleBase = Math.atan2(y1b - y0b, x1b - x0b);
+              angle = angleBase + (Math.random() - 0.5) * (Math.PI / 90); // ±2°
+              length = Math.hypot(x1b - x0b, y1b - y0b) * (0.9 + 0.2 * Math.random());
+              cx = cbx + (Math.random() - 0.5) * 40;
+              cy = cby + (Math.random() - 0.5) * 40;
+            } else {
+              angle = (Math.random() - 0.5) * (Math.PI / 12); // ±15°
+              length = canvas.width * (0.5 + 0.25 * Math.random());
+              cx = canvas.width * (0.1 + 0.8 * Math.random());
+              cy = canvas.height * (0.1 + 0.8 * Math.random());
+            }
+
+            const dx = length / 2;
+            const dy = 0;
+            const cosA = Math.cos(angle);
+            const sinA = Math.sin(angle);
+
+            const x0 = cx - dx * cosA + dy * sinA;
+            const y0 = cy - dx * sinA - dy * cosA;
+            const x1 = cx + dx * cosA + dy * sinA;
+            const y1 = cy + dx * sinA - dy * cosA;
+
+            linesToRender.push([x0, y0, x1, y1]);
+
+            const profile = getLineProfile(img, canvas.width, x0, y0, x1, y1, sampleCount);
+            const score = getStripeScore(profile);
+
+            if (score > bestScoreThisFrame) {
+              bestScoreThisFrame = score;
+              bestLineThisFrame = [x0, y0, x1, y1];
+            }
+          }
+
+          if (bestScoreThisFrame > bestEverScore) {
+            bestEverScore = bestScoreThisFrame;
+            bestEverLine = [...bestLineThisFrame];
+            stableCount = 0;
+          } else {
+            stableCount++;
+          }
+
+          rateDisplay.textContent = `Best Score: ${bestEverScore.toFixed(1)} | Frame Best: ${bestScoreThisFrame.toFixed(1)} | Stable: ${stableCount}`;
+
+          await new Promise(resolve => setTimeout(resolve, delay));
+        }
+      }
+
+      renderFrame();
+      runBarcodeDetectionLoop();
+    }
+
+    init();
+  </script>
+</body>
+</html>
